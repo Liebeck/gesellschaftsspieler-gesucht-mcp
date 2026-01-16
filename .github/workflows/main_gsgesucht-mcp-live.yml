@@ -1,55 +1,61 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
-# More GitHub Actions for Azure: https://github.com/Azure/actions
+# .github/workflows/deploy-live.yml
+name: Live
 
-name: Build and deploy ASP.Net Core app to Azure Web App - gsgesucht-mcp-live
+env:
+  AZURE_WEBAPP_NAME: gsgesucht-mcp-live
+  DOTNET_VERSION: "10.x"
+  DOTNET_PROJECT: Gesellschaftsspieler.MCPServer.csproj
+  PUBLISH_DIR: dotnetcorewebapp
+  PACKAGE_FILE: app.zip
 
 on:
   push:
-    branches:
-      - main
+    branches: [ master ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    runs-on: windows-latest
-    permissions:
-      contents: read #This is required for actions/checkout
+    runs-on: self-hosted
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up .NET Core
+      - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.x'
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Build with dotnet
-        run: dotnet build --configuration Release
+      - name: dotnet restore
+        run: dotnet restore ${{ env.DOTNET_PROJECT }} --nologo --verbosity minimal
 
-      - name: dotnet publish
-        run: dotnet publish -c Release -o "${{env.DOTNET_ROOT}}/myapp"
+      - name: Build (no restore)
+        run: dotnet build ${{ env.DOTNET_PROJECT }} -c Release --no-restore --nologo --verbosity minimal
 
-      - name: Upload artifact for deployment job
-        uses: actions/upload-artifact@v4
-        with:
-          name: .net-app
-          path: ${{env.DOTNET_ROOT}}/myapp
+      - name: Publish (no build)
+        run: dotnet publish ${{ env.DOTNET_PROJECT }} -c Release --no-build -o ${{ env.PUBLISH_DIR }}
 
-  deploy:
-    runs-on: windows-latest
-    needs: build
-    
-    steps:
-      - name: Download artifact from build job
-        uses: actions/download-artifact@v4
-        with:
-          name: .net-app
-      
-      - name: Deploy to Azure Web App
-        id: deploy-to-webapp
+      - name: Zip published app
+        run: (cd ${{ env.PUBLISH_DIR }} && zip -rq ../${{ env.PACKAGE_FILE }} .)
+
+      - name: Deploy to Azure WebApp (ZIP)
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'gsgesucht-mcp-live'
-          slot-name: 'Production'
-          package: .
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_21BDA9B0BE204222A1F153783C9A01D0 }}
+          package: ${{ env.PACKAGE_FILE }}
+
+      - name: Create release Git tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TZ: Europe/Berlin
+        run: |
+          TAG_NAME=release_live-$(date +'%d.%m.%y#%H.%M')
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}
+          git tag "$TAG_NAME"
+
+          git push origin "$TAG_NAME"
