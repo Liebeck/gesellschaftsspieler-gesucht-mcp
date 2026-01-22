@@ -3,5 +3,5 @@
 public sealed class GameListResponseDto
 {
     public int Total { get; set; }
-    public List<GameSummaryDto> Items { get; set; } = new();
+    public List<GameDetailsDto> Items { get; set; } = [];
 }
