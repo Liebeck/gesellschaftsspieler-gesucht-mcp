@@ -1,5 +1,6 @@
 ﻿namespace Gesellschaftsspieler.MCPServer;
 
+using Gesellschaftsspieler.MCPServer.Contracts;
 using Microsoft.EntityFrameworkCore;
 using System.Net;
 
@@ -17,16 +18,15 @@ public sealed class McpCacheWarmupService : IHostedService
         _logger = logger;
     }
 
-    private static string? MapGamePlayTimeToText(int? value) => value switch
+    private static PlayTimeRange? MapGamePlayTimeToRange(int? value) => value switch
     {
-        1 => "1 - 15 Minuten",
-        2 => "15 - 30 Minuten",
-        3 => "30 - 60 Minuten",
-        4 => "1 - 2 Stunden",
-        5 => "2 - 4 Stunden",
-        6 => "4 - 8 Stunden",
-        7 => "> 8 Stunden",
-        null => null,
+        1 => new PlayTimeRange { MinMinutes = 1, MaxMinutes = 15 },
+        2 => new PlayTimeRange { MinMinutes = 15, MaxMinutes = 30 },
+        3 => new PlayTimeRange { MinMinutes = 30, MaxMinutes = 60 },
+        4 => new PlayTimeRange { MinMinutes = 60, MaxMinutes = 120 },
+        5 => new PlayTimeRange { MinMinutes = 120, MaxMinutes = 240 },
+        6 => new PlayTimeRange { MinMinutes = 240, MaxMinutes = 480 },
+        7 => new PlayTimeRange { MinMinutes = 480, MaxMinutes = null },
         _ => null
     };
 
@@ -55,19 +55,18 @@ public sealed class McpCacheWarmupService : IHostedService
 
         // Build dictionary
         var dict = core.ToDictionary(
-    g => g.GameId,
-    g => new GameReadModel
-    {
-        GameId = g.GameId,
-        GameHashId = g.GameHashId,
-        Name = WebUtility.HtmlDecode(g.Name),
-        ReleaseYear = g.ReleaseYear,
-        PlayerMin = g.PlayerCountMin,
-        PlayerMax = g.PlayerCountMax,
-        GsgRank = g.GSGRank,
-        GamePlayTime = MapGamePlayTimeToText(g.GamePlayTime) // <-- here
-    });
-
+            g => g.GameId,
+            g => new GameReadModel
+            {
+                GameId = g.GameId,
+                GameHashId = g.GameHashId,
+                Name = WebUtility.HtmlDecode(g.Name),
+                ReleaseYear = g.ReleaseYear,
+                PlayerMin = g.PlayerCountMin,
+                PlayerMax = g.PlayerCountMax,
+                GsgRank = g.GSGRank,
+                GamePlayTime = MapGamePlayTimeToRange(g.GamePlayTime)
+            });
 
         foreach (var a in alt)
             if (dict.TryGetValue(a.GameId, out var game))
