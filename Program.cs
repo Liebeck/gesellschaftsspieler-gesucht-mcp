@@ -4,8 +4,10 @@ using Azure.Identity;
 using Azure.Monitor.OpenTelemetry.AspNetCore;
 using Azure.Security.KeyVault.Secrets;
 using Gesellschaftsspieler.MCPServer;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -73,8 +75,103 @@ builder.Services
     .WithHttpTransport()
     .WithToolsFromAssembly(); // scans for [McpServerToolType]
 
+// --- Enforcement (rate limits, quota, blocklist, roles) applied centrally to tools/call.
+builder.Services.Configure<Gesellschaftsspieler.MCPServer.Enforcement.McpEnforcementOptions>(
+    builder.Configuration.GetSection(Gesellschaftsspieler.MCPServer.Enforcement.McpEnforcementOptions.SectionName));
+// Write-confirmation mode (ToolLevel default = two-call confirm parameter; Protocol = elicitation/MRTR).
+builder.Services.Configure<Gesellschaftsspieler.MCPServer.Enforcement.WriteConfirmationOptions>(
+    builder.Configuration.GetSection("Mcp"));
+builder.Services.AddSingleton<Gesellschaftsspieler.MCPServer.Enforcement.InMemoryMcpUsageStore>();
+builder.Services.AddSingleton<Gesellschaftsspieler.MCPServer.Enforcement.McpRateLimiter>();
+builder.Services.AddSingleton<Gesellschaftsspieler.MCPServer.Enforcement.McpEnforcementService>();
+builder.Services.AddHostedService<Gesellschaftsspieler.MCPServer.Enforcement.McpUsagePruneService>();
+builder.Services.PostConfigure<ModelContextProtocol.Server.McpServerOptions>(options =>
+{
+    // SDK 2.0: request filters moved under Filters.Request (were directly on Filters in 0.5-preview).
+    options.Filters.Request.CallToolFilters.Add(Gesellschaftsspieler.MCPServer.Enforcement.EnforcementFilters.CallTool);
+    options.Filters.Request.ListToolsFilters.Add(Gesellschaftsspieler.MCPServer.Enforcement.EnforcementFilters.ListTools);
+});
+
+// --- OAuth: validate access tokens issued by Gesellschaftsspieler-gesucht (the authorization server).
+// Tokens are plain JWTs (the AS disables access-token encryption), so standard JWT bearer works.
+var oidcAuthority = builder.Configuration["Oidc:Authority"];
+var oidcAudience = builder.Configuration["Oidc:Audience"];
+// When true, the whole /mcp endpoint requires a valid token (401 -> OAuth discovery for MCP clients
+// like ChatGPT/Claude). When false (default) public tools stay anonymous and only "whoami" needs auth.
+var requireAuthentication = builder.Configuration.GetValue<bool>("Mcp:RequireAuthentication");
+
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = oidcAuthority;
+        options.Audience = oidcAudience;
+        options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
+        // Keep original claim names (sub, preferred_username) instead of remapping them.
+        options.MapInboundClaims = false;
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = !string.IsNullOrWhiteSpace(oidcAuthority),
+            ValidIssuer = oidcAuthority,
+            ValidateAudience = !string.IsNullOrWhiteSpace(oidcAudience),
+            ValidAudience = oidcAudience,
+            NameClaimType = "preferred_username",
+            RoleClaimType = "role"
+        };
+        // Point unauthenticated MCP clients at the RFC 9728 protected-resource metadata.
+        options.Events = new JwtBearerEvents
+        {
+            OnChallenge = context =>
+            {
+                context.HandleResponse();
+                var metadataUrl = $"{context.Request.Scheme}://{context.Request.Host}/.well-known/oauth-protected-resource";
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                context.Response.Headers.WWWAuthenticate = $"Bearer resource_metadata=\"{metadataUrl}\"";
+                return Task.CompletedTask;
+            }
+        };
+    });
+builder.Services.AddAuthorization();
+
+// Typed client for the web app's MCP-facing API (/api/mcp/*). Forwards the user's token.
+var apiBaseUrl = builder.Configuration["GsGesucht:ApiBaseUrl"];
+builder.Services.AddHttpClient<Gesellschaftsspieler.MCPServer.Services.GsGesuchtApiClient>(client =>
+{
+    if (!string.IsNullOrWhiteSpace(apiBaseUrl))
+    {
+        client.BaseAddress = new Uri(apiBaseUrl);
+    }
+});
+
 
 var app = builder.Build();
 app.UseRateLimiter();
-app.MapMcp(pattern: "/mcp").RequireRateLimiting("PerIpRateLimit");
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+// RFC 9728 Protected Resource Metadata: lets MCP clients discover the authorization server.
+app.MapGet("/.well-known/oauth-protected-resource", (HttpContext context) =>
+{
+    var resource = oidcAudience ?? $"{context.Request.Scheme}://{context.Request.Host}";
+    return Results.Json(new
+    {
+        resource,
+        authorization_servers = string.IsNullOrWhiteSpace(oidcAuthority)
+            ? Array.Empty<string>()
+            : new[] { oidcAuthority!.TrimEnd('/') },
+        scopes_supported = new[] { "mcp" },
+        bearer_methods_supported = new[] { "header" }
+    });
+});
+
+var mcpEndpoint = app.MapMcp(pattern: "/mcp").RequireRateLimiting("PerIpRateLimit");
+if (requireAuthentication)
+{
+    // Full protection: every /mcp call needs a valid token.
+    mcpEndpoint.RequireAuthorization();
+}
+// Otherwise /mcp stays anonymous; UseAuthentication still populates the user when a token is
+// present, so the "whoami" tool can identify the caller opportunistically.
+
 app.Run();
