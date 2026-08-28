@@ -95,7 +95,9 @@ builder.Services.PostConfigure<ModelContextProtocol.Server.McpServerOptions>(opt
 // --- OAuth: validate access tokens issued by Gesellschaftsspieler-gesucht (the authorization server).
 // Tokens are plain JWTs (the AS disables access-token encryption), so standard JWT bearer works.
 var oidcAuthority = builder.Configuration["Oidc:Authority"];
-var oidcAudience = builder.Configuration["Oidc:Audience"];
+// Accepted token audiences: Oidc:Audience is always the default entry; Mcp:ValidAudiences adds more so
+// that tokens minted for the direct App Service URL and for an APIM gateway URL validate in parallel.
+var validAudiences = McpProtectedResource.ResolveValidAudiences(builder.Configuration);
 // When true, the whole /mcp endpoint requires a valid token (401 -> OAuth discovery for MCP clients
 // like ChatGPT/Claude). When false (default) public tools stay anonymous and only "whoami" needs auth.
 var requireAuthentication = builder.Configuration.GetValue<bool>("Mcp:RequireAuthentication");
@@ -105,7 +107,6 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
         options.Authority = oidcAuthority;
-        options.Audience = oidcAudience;
         options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
         // Keep original claim names (sub, preferred_username) instead of remapping them.
         options.MapInboundClaims = false;
@@ -113,8 +114,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         {
             ValidateIssuer = !string.IsNullOrWhiteSpace(oidcAuthority),
             ValidIssuer = oidcAuthority,
-            ValidateAudience = !string.IsNullOrWhiteSpace(oidcAudience),
-            ValidAudience = oidcAudience,
+            ValidateAudience = validAudiences.Count > 0,
+            ValidAudiences = validAudiences,
             NameClaimType = "preferred_username",
             RoleClaimType = "role"
         };
@@ -124,7 +125,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             OnChallenge = context =>
             {
                 context.HandleResponse();
-                var metadataUrl = $"{context.Request.Scheme}://{context.Request.Host}/.well-known/oauth-protected-resource";
+                var metadataUrl = McpProtectedResource.ResolveMetadataUrl(
+                    builder.Configuration, $"{context.Request.Scheme}://{context.Request.Host}");
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 context.Response.Headers.WWWAuthenticate = $"Bearer resource_metadata=\"{metadataUrl}\"";
                 return Task.CompletedTask;
@@ -153,7 +155,8 @@ app.UseAuthorization();
 // RFC 9728 Protected Resource Metadata: lets MCP clients discover the authorization server.
 app.MapGet("/.well-known/oauth-protected-resource", (HttpContext context) =>
 {
-    var resource = oidcAudience ?? $"{context.Request.Scheme}://{context.Request.Host}";
+    var resource = McpProtectedResource.ResolveResource(
+        app.Configuration, $"{context.Request.Scheme}://{context.Request.Host}");
     return Results.Json(new
     {
         resource,
