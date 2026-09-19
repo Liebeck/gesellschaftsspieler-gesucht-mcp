@@ -24,7 +24,7 @@ The server provides three main tools for AI assistants:
 - **Security**: Secrets managed via Azure Key Vault
 - **Observability**: OpenTelemetry integration with Azure Monitor for tracing and metrics
 - **Performance**: In-memory caching with background warmup service
-- **Data Access**: Read-only database access via Entity Framework Core
+- **Data Access**: Read-only database access via Entity Framework Core, plus an insert-only tool-call log (every tool call and session start → one row in `McpToolCallLogs`, written asynchronously in batches; the server runs the SDK's stateless HTTP transport, so the logged session id is always empty, and the client name falls back to the HTTP User-Agent when the MCP client name isn't available)
 
 ## Architecture
 
@@ -47,7 +47,7 @@ The server provides three main tools for AI assistants:
          ▼
 ┌─────────────────┐
 │   SQL Server    │
-│  (Read-only)    │
+│ (Read + Log DB) │
 └─────────────────┘
 ```
 
@@ -66,6 +66,8 @@ The application uses the following configuration:
 
 - **KeyVaultUri**: Azure Key Vault endpoint for secrets management
 - **ConnectionStrings:McpReadDb**: SQL Server connection string (can be stored in Key Vault)
+- **ConnectionStrings:McpLogDb**: Connection string of an insert-only SQL user for the tool-call log (optional; without it nothing is logged)
+- **Mcp:ToolCallLog**: `Enabled`, `LogArguments`, `LogResults`, `QueueCapacity`, `BatchSize`
 - **APPLICATIONINSIGHTS_CONNECTION_STRING**: Azure Application Insights connection string
 
 ## API Endpoint

@@ -4,6 +4,7 @@ using Azure.Identity;
 using Azure.Monitor.OpenTelemetry.AspNetCore;
 using Azure.Security.KeyVault.Secrets;
 using Gesellschaftsspieler.MCPServer;
+using Gesellschaftsspieler.MCPServer.Logging;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -33,6 +34,30 @@ builder.Services.AddDbContext<McpReadDbContext>(options =>
 {
     options.UseSqlServer(builder.Configuration.GetConnectionString("McpReadDb"));
 });
+
+// --- Tool-call log: every tools/call and initialize becomes a row in dbo.McpToolCallLogs.
+// Written through a separate insert-only SQL user; without the connection string nothing is logged.
+builder.Services.Configure<ToolCallLogOptions>(builder.Configuration.GetSection(ToolCallLogOptions.SectionName));
+var toolCallLogConnection = builder.Configuration.GetConnectionString("McpLogDb");
+var toolCallLogEnabled = builder.Configuration.GetValue($"{ToolCallLogOptions.SectionName}:Enabled", true);
+if (toolCallLogEnabled && !string.IsNullOrWhiteSpace(toolCallLogConnection))
+{
+    builder.Services.AddDbContextFactory<McpLogDbContext>(options => options.UseSqlServer(
+        toolCallLogConnection,
+        // Force single-row inserts: with EF Core 10, a multi-row flush becomes a MERGE ... OUTPUT,
+        // but the insert-only mcp_logger SQL user only has INSERT + SELECT on McpToolCallLogId.
+        // MaxBatchSize(1) keeps every insert as INSERT ... OUTPUT INSERTED.McpToolCallLogId, which
+        // those grants cover.
+        sql => sql.MaxBatchSize(1)));
+    builder.Services.AddSingleton<IToolCallLogStore, SqlToolCallLogStore>();
+    builder.Services.AddSingleton<ToolCallLogWriter>();
+    builder.Services.AddSingleton<IToolCallLogQueue>(sp => sp.GetRequiredService<ToolCallLogWriter>());
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<ToolCallLogWriter>());
+}
+else
+{
+    builder.Services.AddSingleton<IToolCallLogQueue, NullToolCallLogQueue>();
+}
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -88,8 +113,12 @@ builder.Services.AddHostedService<Gesellschaftsspieler.MCPServer.Enforcement.Mcp
 builder.Services.PostConfigure<ModelContextProtocol.Server.McpServerOptions>(options =>
 {
     // SDK 2.0: request filters moved under Filters.Request (were directly on Filters in 0.5-preview).
+    // The SDK wraps filters in list order (first = outermost). Logging goes first so it also
+    // records the calls enforcement rejects.
+    options.Filters.Request.CallToolFilters.Add(ToolCallLogFilters.CallTool);
     options.Filters.Request.CallToolFilters.Add(Gesellschaftsspieler.MCPServer.Enforcement.EnforcementFilters.CallTool);
     options.Filters.Request.ListToolsFilters.Add(Gesellschaftsspieler.MCPServer.Enforcement.EnforcementFilters.ListTools);
+    options.Filters.Message.IncomingFilters.Add(ToolCallLogFilters.Initialize);
 });
 
 // --- OAuth: validate access tokens issued by Gesellschaftsspieler-gesucht (the authorization server).
