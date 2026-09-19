@@ -1,3 +1,4 @@
+using Gesellschaftsspieler.MCPServer.Logging;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -22,6 +23,7 @@ public static class EnforcementFilters
             var denial = await enforcement.CheckAsync(caller, tool, ct);
             if (denial is not null)
             {
+                ToolCallLogFilters.MarkDenied(context);
                 return denial;
             }
 
